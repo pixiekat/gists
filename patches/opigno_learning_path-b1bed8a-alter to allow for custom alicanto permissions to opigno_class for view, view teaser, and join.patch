@@ -1,0 +1,31 @@
+From b1bed8ae5cd7f547ac5215e2d65f8f580065b3b1 Mon Sep 17 00:00:00 2001
+From: Katie Elizabeth <32232155+pixiekat@users.noreply.github.com>
+Date: Mon, 23 Sep 2024 10:40:14 -0400
+Subject: [PATCH] alter to allow for custom alicanto permissions to
+ opigno_class for view, view teaser, and join
+
+---
+ opigno_learning_path.module | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/opigno_learning_path.module b/opigno_learning_path.module
+index 07a4e3d..875481a 100644
+--- a/opigno_learning_path.module
++++ b/opigno_learning_path.module
+@@ -1622,7 +1622,12 @@ function opigno_learning_path_group_presave(Group $group) {
+ function opigno_learning_path_group_access(Group $group, $operation, AccountInterface $account) {
+   $opigno_types = ['learning_path', 'opigno_course', 'opigno_class'];
+   $group_type = $group->bundle();
+-  if (!in_array($group_type, $opigno_types)) {
++  if (!in_array($group_type, $opigno_types) ) {
++    return AccessResult::neutral();
++  }
++
++  // KEB, 9/19/24: We're going to handle opigno_class in alicanto_groups.
++  if ($group_type == 'opigno_class' && in_array($operation, ['view', 'view teaser', 'join'])) {
+     return AccessResult::neutral();
+   }
+ 
+-- 
+2.46.1.windows.1
+
