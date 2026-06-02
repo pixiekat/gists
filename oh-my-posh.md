@@ -1,3 +1,20 @@
+# Oh My Posh Install/Update
+
+Basic script to install and update oh-my-posh, adopted and forked from [BraINstinct0](https://gist.github.com/BraINstinct0/7624d58eee2917267e6f1ba79571dd90).
+
+## Install
+
+```bash
+echo "Installing 'Oh My Posh'..."
+sudo wget https://www.github.com/JanDeDobbeleer/oh-my-posh/releases/latest/download/posh-linux-amd64 -O /usr/local/bin/oh-my-posh
+sudo chmod +x /usr/local/bin/oh-my-posh
+echo "Oh My Posh installation complete. Version:"
+oh-my-posh --version
+```
+
+## Update
+
+```bash
 #!/bin/bash
 
 if [[ ! $(command -v jq) ]]; then
@@ -28,3 +45,4 @@ else
         echo "Aborting..."
         exit 1
 fi
+```
