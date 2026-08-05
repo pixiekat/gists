@@ -34,13 +34,15 @@ mkvextract tracks "filename.mkv" <ID>:"filename.en.idx"
 Set default audio tracks:
 
 ```bash
+# track:a<#> = audio, track:v<#> = video, track:s<#> = subtitle
 mkvpropedit "filename.mkv" --edit track:a1 --set flag-default=1 --edit track:a2 --set flag-default=0 
 ```
 
 Set name of audio track:
 
 ```bash
-mkvpropedit "filename.mkv" --edit track:a1 --set name="English"  
+# track:a<#> = audio, track:v<#> = video, track:s<#> = subtitle
+mkvpropedit "filename.mkv" --edit track:a<#> --set name="English"  
 ```
 
 You can use `mkvtoolnix-gui` for a GUI experience.
