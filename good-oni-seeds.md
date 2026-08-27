@@ -1,0 +1,3 @@
+# Good ONI Seeds
+
+2026 Chaos Crew Seed: `AQU-C-2062598859-0-1A-J5XRH4Y1`
