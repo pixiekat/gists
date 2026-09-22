@@ -46,3 +46,17 @@ mkvpropedit "filename.mkv" --edit track:a<#> --set name="English"
 ```
 
 You can use `mkvtoolnix-gui` for a GUI experience.
+
+Switch from ssdm:
+
+```bash
+# check what you're actually on right now
+cat /etc/X11/default-display-manager
+systemctl status display-manager --no-pager | head -3
+
+# make sure Mint's greeter stack is present before you switch
+sudo apt install --reinstall lightdm lightdm-settings slick-greeter
+
+# re-run the chooser — pick lightdm in the ncurses menu
+sudo dpkg-reconfigure lightdm
+```
