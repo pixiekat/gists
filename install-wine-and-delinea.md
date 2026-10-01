@@ -272,7 +272,7 @@ installed this failed with an "install .NET Framework" error; now it should succ
 > ```
 >
 > If you see `wine-stable`, either change it to `wine` or write your own launcher
-> (see [section 10.5](#105-a-menu-launcher-that-actually-works) for an example).
+> (see [section 10.6](#106-a-menu-launcher-that-actually-works) for an example).
 
 ---
 
@@ -429,6 +429,8 @@ registered with the **desktop** via `xdg-mime`, not inside a particular browser.
 | `wbemprox:wql_error` | App's WMI query isn't parseable by Wine | Usually harmless |
 | `err:ole:...` floods | Wine COM noise | Harmless |
 | App starts in the wrong prefix | Launcher missing `WINEPREFIX` | Add `env WINEPREFIX=...` to its `Exec=` |
+| `TypeLoadException` naming a `Windows.*` type | App used a WinRT feature Wine lacks | See the WinRT rule of thumb below |
+| `Couldn't get first exception ... No backtrace available` | Debugger attached too late to see the error | Capture the app's output to a log and grep for `Exception Info` |
 
 ### Check where a login redirect goes
 
@@ -438,6 +440,27 @@ If login still times out, open the browser dev console (**Ctrl+Shift+K** in Fire
 - `sslauncher://...` means it's the protocol handler, so check step 7.
 - `http://127.0.0.1:PORT/...` or `localhost` means the app uses a loopback listener instead.
   Check whether it's listening with `ss -tlnp | grep wine`.
+
+### Rule of thumb: switch off WinRT features in *any* Windows app
+
+Modern Windows apps use **WinRT** (the Windows 10/11 runtime) for a handful of features,
+and **Wine doesn't provide WinRT**. An app that touches one can crash outright. Fork hit
+this twice (see [10.3](#103-fix-theme-crash-on-windows-10-typeloadexception) and
+[10.5](#105-fix-random-crashes-from-github-notifications-sendwindowsnotification)).
+For any app you run under Wine, switch off or avoid:
+
+| Feature | Why | Do instead |
+|---|---|---|
+| **System / desktop / toast notifications** | Toasts are built with WinRT XML types | Untick notifications in the app's settings |
+| **"Follow system theme" / auto light-dark** | Theme detection uses WinRT UI APIs | Pick a fixed theme, or a per-app Windows 7 override |
+| **Windows Share, "Open with…" pickers, live tiles/badges** | Same WinRT family | Don't use them |
+
+**How to recognize it:** a .NET app dies with `System.TypeLoadException` naming a type that
+starts with `Windows.`, such as `Could not find Windows Runtime type
+'Windows.Data.Xml.Dom.XmlDocument'`, often next to `RoGetActivationFactory Failed to find
+library` lines. Read the stack trace above the type name (e.g.
+`NotificationManager.SendWindowsNotification`, `SystemThemeHelper...`) to see which feature
+triggered it, then turn that feature off.
 
 ### Known limitation: RDP sessions
 
@@ -604,7 +627,48 @@ The last `debug1:` lines show which key it's trying or what it's waiting for.
 > actually finished. First SSH connections under Wine can be slow, so a fetch that
 > *looks* stuck may have quietly succeeded.
 
-### 10.5 A menu launcher that actually works
+### 10.5 Fix: random crashes from GitHub notifications (`SendWindowsNotification`)
+
+**Symptom:** Fork occasionally closes on its own mid-session, with no obvious trigger.
+Wine shows a "Program Error" dialog and a debugger dump that says
+`Couldn't get first exception ... No backtrace available` (not helpful on its own).
+
+**Finding the real error:** the dump doesn't show the exception, but Fork's own output does.
+Launch Fork with the *logging* launcher (see [10.6](#106-a-menu-launcher-that-actually-works)),
+use it normally until it crashes, then:
+
+```bash
+grep -n -B2 -A15 'Exception Info' ~/fork-debug.log
+```
+
+What it showed:
+
+```text
+System.TypeLoadException: Could not find Windows Runtime type 'Windows.Data.Xml.Dom.XmlDocument'.
+   at Fork.Accounts.NotificationManager.SendWindowsNotification(String xmlString)
+   at Fork.Accounts.NotificationManager.<>c__DisplayClass29_1.<Refresh>b__3()
+```
+
+**Why:** once a **GitHub account** is connected, Fork's notification manager refreshes in the
+background, and when there's something new (a PR review, mention, CI result) it shows a
+**Windows 10 toast notification**. Toasts are built with WinRT (`Windows.Data.Xml.Dom`),
+which Wine doesn't provide, so Fork crashes. That explains why the crashes:
+
+- only started *after* connecting the GitHub account,
+- were rare and seemed random (they only fire when there's something to notify about),
+- weren't fixed by the Windows 7 override from 10.3 (this code path doesn't fall back).
+
+**Fix:** open Fork's **Accounts** dialog, select the GitHub account, and untick
+**Enable Notifications**. Do this for each connected account.
+
+The account stays connected (OAuth, PR integration and so on keep working); only the toast
+notifications are turned off.
+
+> **Copying the prefix to another machine?** Fork's settings live inside the prefix (the
+> Windows user's `AppData`), so an `rsync`'d `.wine-fork` keeps this setting. A
+> *fresh* install needs it unticked again.
+
+### 10.6 A menu launcher that actually works
 
 Wine auto-creates `~/.local/share/applications/wine/Programs/Fork.desktop`, but it calls
 `wine-stable` (see the note in [section 5](#5-install-delinea-connection-manager)) and goes
@@ -685,14 +749,26 @@ xprop WM_CLASS      # then click the Fork window
 
 and set `StartupWMClass=` to it. For Fork it's `fork.exe`, which is what the launcher above uses.
 
-**Optional: debug-logging launcher.** Use this while troubleshooting, then switch back:
+**Optional: debug-logging launcher.** This is how the notification crash in 10.5 was
+caught. Each launch *appends* to the log with a timestamped header, so relaunching after a
+crash doesn't wipe the evidence:
 
 ```ini
-# Each menu launch overwrites ~/fork-debug.log with Wine's output
-Exec=sh -c 'WINEPREFIX=/home/katy/.wine-fork wine "/home/katy/.wine-fork/drive_c/users/katy/AppData/Local/Fork/current/Fork.exe" > /home/katy/fork-debug.log 2>&1'
+# >> appends; the echo writes "=== launched <date> ===" so sessions are easy to tell apart
+Exec=sh -c 'echo "=== launched $(date) ===" >> /home/katy/fork-debug.log; WINEPREFIX=/home/katy/.wine-fork wine "/home/katy/.wine-fork/drive_c/users/katy/AppData/Local/Fork/current/Fork.exe" >> /home/katy/fork-debug.log 2>&1'
 ```
 
-### 10.6 Nice-to-haves
+Test it the way the menu runs it, then check the header appeared:
+
+```bash
+gtk-launch git-fork
+head -5 ~/fork-debug.log      # expect: === launched Wed 30 Sep 19:20:55 EDT 2026 ===
+```
+
+Because it appends forever, check its size now and then (`ls -lh ~/fork-debug.log`), and
+switch back to the plain `Exec=` line once things are stable.
+
+### 10.7 Nice-to-haves
 
 **A drive letter for your projects.** Wine exposes all of Linux as `Z:`, so
 `/home/<you>/webdev/projects` shows up in Fork as `Z:\home\<you>\webdev\projects`. A
@@ -707,10 +783,69 @@ ls -l ~/.wine-fork/dosdevices/     # p: -> /home/<you>/webdev/projects
 After restarting Fork, repos show as `P:\...`. It's the same files, so Fork and your Linux
 terminal and editor stay in sync.
 
-**Line endings and file modes.** Windows Git inside Fork and Linux Git share these repos.
-If `git status` on Linux suddenly shows every file as modified, check Fork's Git config:
-`core.autocrlf` should be `false` (or `input`), and `core.fileMode` should match your
-Linux setup.
+**Phantom changes: line endings and file modes.** Windows Git inside Fork and Linux Git
+share the same repos, so Fork can show files as modified (yellow `M`) when nothing has
+changed. Click one and check its diff:
+
+- `changed file mode 100755 → 100644` means file permissions. This is the common one under
+  Wine, because Windows Git can't read Linux's executable bit through `Z:`.
+- Every line changed but identical means line endings. Git for Windows ships with
+  `core.autocrlf=true` in its system config.
+
+Confirm with `git status` in your Linux terminal: if Linux says clean, the files really
+are unchanged.
+
+*Line endings (Fork's Git only).* Fork's Git reads its global config from the **Windows**
+profile, which Linux Git never reads:
+
+```bash
+cat >> ~/.wine-fork/drive_c/users/<you>/.gitconfig << 'EOF'
+
+[core]
+	# Git for Windows' system config sets autocrlf=true (convert LF <-> CRLF).
+	# Our repos are LF and shared with Linux Git, so never convert.
+	autocrlf = false
+EOF
+```
+
+*File modes (per repo).* This **can't** go in the global file, because Linux Git writes
+`filemode = true` into each repo's `.git/config`, and repo settings override global ones.
+Set it per repo instead:
+
+```bash
+# One repo
+git -C ~/webdev/projects/some-repo config core.fileMode false
+
+# Every repo under projects, any depth (repos are nested by host, e.g. codeberg/pixiekat/...)
+#   -name .git -type d = real repo folders; -prune = don't descend into .git itself
+find ~/webdev/projects -name .git -type d -prune | while read -r gitdir; do
+  repo="$(dirname "$gitdir")"
+  git -C "$repo" config core.fileMode false && echo "set: $repo"
+done
+```
+
+For new clones, a small zsh function does it automatically:
+
+```zsh
+# Clone like normal, then set fileMode false in the new repo.
+# Usage: gclone <url> [folder]
+gclone() {
+  git clone "$@" || return                  # stop if the clone failed
+  local dir="${2:-$(basename "$1" .git)}"   # folder: 2nd arg, or derived from the URL
+  git -C "$dir" config core.fileMode false && echo "fileMode=false set in $dir"
+}
+```
+
+`fileMode=false` only makes Git *stop reporting* permission differences. Executables
+already committed as `100755` stay that way. To deliberately commit an executable bit:
+`git update-index --chmod=+x path/to/script.sh`.
+
+> **Dotfiles and script repos: commit from Linux, not Fork.** In repos where the
+> executable bit and symlinks matter (shell scripts, `~/.local/bin`, oh-my-zsh plugins),
+> staging from Fork can commit scripts as `100644`, which makes them non-executable on the
+> next checkout, or turn a symlink into a plain text file. Use Fork to browse history
+> and diffs there, and make commits from your Linux terminal. Plain PHP, Twig and YAML repos
+> are fine to commit from Fork.
 
 **Self-updates.** Velopack updates work under Wine. As a precaution, snapshot first:
 
@@ -731,7 +866,7 @@ mkdir -p ~/backups
 tar -czf ~/backups/wine-fork-$(date +%F).tar.gz -C ~ .wine-fork
 ```
 
-### 10.7 Readability: fonts, smoothing and DPI
+### 10.8 Readability: fonts, smoothing and DPI
 
 Out of the box, WPF apps under Wine can have jagged, cramped, or unevenly spaced text.
 Three per-prefix settings fixed most of it for me, in this order of impact.
@@ -778,7 +913,7 @@ WINEPREFIX=~/.wine-fork winecfg
 > **Tip:** these are all per-prefix, so apply the same three to `.wine-delinea` for
 > nicer text in Connection Manager too.
 
-### 10.8 Fork: harmless noise
+### 10.9 Fork: harmless noise
 
 | Message | Meaning |
 |---|---|
@@ -786,7 +921,7 @@ WINEPREFIX=~/.wine-fork winecfg
 | `RoGetActivationFactory ... Windows.ApplicationModel.DesignMode` | WinRT lookup Wine can't satisfy; harmless once the Win7 override is set |
 | `AsyncCausalityTracer`, `wbemprox:wql_error`, `err:ole:...` | Same .NET-under-Wine noise as Delinea |
 
-### 10.9 Known limitations: WebView2 and the Console button
+### 10.10 Known limitations: WebView2 and the Console button
 
 Fork ships **WebView2** (`Microsoft.Web.WebView2.*.dll`), Microsoft's Edge-based embedded
 browser, for some panels. Wine 9.0 doesn't provide it. If a panel shows up blank or Fork
