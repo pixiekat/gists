@@ -60,3 +60,36 @@ sudo apt install --reinstall lightdm lightdm-settings slick-greeter
 # re-run the chooser — pick lightdm in the ncurses menu
 sudo dpkg-reconfigure lightdm
 ```
+
+## Rclone Mounting
+
+Find mounted drives in rclone:
+
+```bash
+findmnt -t fuse.rclone
+```
+
+Unmount it:
+
+```bash
+fusermount -u /path/to/mountpoint
+```
+
+Check for rclone process:
+
+```bash
+pgrep -a rclone
+```
+
+## Fstab
+
+Editing and reloading:
+
+```bash
+sudo cp /etc/fstab /etc/fstab.bak          # backup first, always
+sudo nano /etc/fstab                        # make the edit
+sudo systemctl daemon-reload                # systemd builds mount units from fstab
+sudo umount </path/to/drive>
+sudo mount -a                               # remount with the new options
+ls -ld </path/to/drive>   # should show drwxrwxr-x katy media
+```
