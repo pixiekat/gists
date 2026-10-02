@@ -431,6 +431,7 @@ registered with the **desktop** via `xdg-mime`, not inside a particular browser.
 | App starts in the wrong prefix | Launcher missing `WINEPREFIX` | Add `env WINEPREFIX=...` to its `Exec=` |
 | `TypeLoadException` naming a `Windows.*` type | App used a WinRT feature Wine lacks | See the WinRT rule of thumb below |
 | `Couldn't get first exception ... No backtrace available` | Debugger attached too late to see the error | Capture the app's output to a log and grep for `Exception Info` |
+| Delinea login works, but `ssh` / `launch` says `No route to host` | A local **Docker network** is using the work host's subnet | See "No route to host" below |
 
 ### Check where a login redirect goes
 
@@ -440,6 +441,88 @@ If login still times out, open the browser dev console (**Ctrl+Shift+K** in Fire
 - `sslauncher://...` means it's the protocol handler, so check step 7.
 - `http://127.0.0.1:PORT/...` or `localhost` means the app uses a loopback listener instead.
   Check whether it's listening with `ss -tlnp | grep wine`.
+
+### "No route to host" when launching through Delinea (Docker subnet collision)
+
+**Symptom:** the Delinea external-browser login works and you can see your secrets, but
+SSH to the Delinea proxy (or `launch <secret-id>`) fails immediately, even by IP:
+
+```text
+debug1: Connecting to mapwdelineaps02.example.org [172.21.20.44] port 22.
+debug1: connect to address 172.21.20.44 port 22: No route to host
+```
+
+**Why:** "No route to host" is a *network* failure: SSH, keys and Delinea never get a chance.
+The vault's web login uses a different host and route, so it can work while this fails.
+The culprit was **Docker**. Docker creates bridge networks in `172.17.0.0`–`172.31.0.0`,
+and a leftover compose network had claimed `172.21.0.0/16`, the same range as the work
+host. The kernel sent the traffic to an empty local Docker bridge instead of through the
+VPN. A network with **no running containers** still keeps its route, so it can bite you
+long after you've stopped the project.
+
+**Diagnose:** ask the kernel which interface it would use:
+
+```bash
+ip route get 172.21.20.44
+```
+
+| Output shows | Meaning |
+|---|---|
+| `dev br-xxxxxxxxxxxx` or `dev docker0` | **Docker collision.** Traffic never reaches the VPN |
+| your VPN interface (`tun0`, `ppp0`, ...) | Routing is fine; a work-side firewall or proxy rule is refusing you |
+| your normal Wi-Fi/Ethernet interface | The VPN doesn't route that subnet (split tunnel); ask IT |
+
+Find which Docker network owns the range:
+
+```bash
+docker network ls -q | xargs docker network inspect -f '{{.Name}}: {{range .IPAM.Config}}{{.Subnet}}{{end}}'
+# ctomop_default: 172.21.0.0/16   <- the culprit
+```
+
+**Quick fix:** remove the unused network (works when no containers are attached), then
+re-check the route and connect:
+
+```bash
+docker network rm ctomop_default
+ip route get 172.21.20.44        # should now show the VPN interface
+ssh -t -i ~/.ssh/<delinea-key> "<user>@<domain>"@<delinea-proxy-host> -C "launch <secret-id>"
+```
+
+**Lasting fix, pick one (or both):**
+
+*Per project:* pin the compose project's subnet so it can't land on the work range:
+
+```yaml
+networks:
+  default:
+    ipam:
+      config:
+        # Keep this project off 172.21.x.x, which collides with work hosts behind the VPN
+        - subnet: 10.210.50.0/24
+```
+
+*Globally:* move Docker's default pool out of `172.x` for every future network. In
+`/etc/docker/daemon.json` (merge with any existing keys):
+
+```json
+{
+  "default-address-pools": [
+    { "base": "10.210.0.0/16", "size": 24 }
+  ]
+}
+```
+
+then `sudo systemctl restart docker` (this briefly restarts running containers). Existing
+networks keep their old ranges until recreated with `docker compose down && docker compose up -d`.
+
+> **Check which ranges the VPN actually uses** before picking a Docker range. While
+> connected: `ip route | grep tun0` (use your VPN interface name). Choose a Docker range
+> that overlaps none of them.
+
+> **While you're in the compose file:** on a laptop that joins a work VPN, publish
+> container ports on loopback only (`"127.0.0.1:8001:8000"`, not `"8001:8000"`).
+> Docker-published ports bypass ufw, so a bare port is reachable by anyone on the LAN
+> **and** the VPN.
 
 ### Rule of thumb: switch off WinRT features in *any* Windows app
 
@@ -972,5 +1055,8 @@ your real Git, shell and SSH agent, and Fork picks up the changes on its next re
   `Fonts\Replacements` table expects).
 - **[Velopack docs](https://docs.velopack.io)**: how the `current` / `packages` /
   `Update.exe` layout and self-updates work.
+- **`man ip-route`**: how `ip route get` picks an interface, and how to read routing tables.
+- **[Docker docs: daemon `default-address-pools`](https://docs.docker.com/reference/cli/dockerd/)**:
+  controlling which subnets Docker hands out to new networks.
 - **[Git for Windows FAQ](https://github.com/git-for-windows/git/wiki/FAQ)**: MSYS2 path
   handling, `core.autocrlf`, and `core.fileMode`.
