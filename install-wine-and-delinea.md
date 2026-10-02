@@ -451,7 +451,7 @@ For any app you run under Wine, switch off or avoid:
 
 | Feature | Why | Do instead |
 |---|---|---|
-| **System / desktop / toast notifications** | Toasts are built with WinRT XML types | Untick notifications in the app's settings |
+| **System / desktop / toast notifications** | Toasts are built with WinRT XML types | Turn them off, and check the setting survives a restart. If it doesn't (Fork's didn't), remove whatever triggers them, such as a connected account |
 | **"Follow system theme" / auto light-dark** | Theme detection uses WinRT UI APIs | Pick a fixed theme, or a per-app Windows 7 override |
 | **Windows Share, "Open with…" pickers, live tiles/badges** | Same WinRT family | Don't use them |
 
@@ -658,15 +658,27 @@ which Wine doesn't provide, so Fork crashes. That explains why the crashes:
 - were rare and seemed random (they only fire when there's something to notify about),
 - weren't fixed by the Windows 7 override from 10.3 (this code path doesn't fall back).
 
-**Fix:** open Fork's **Accounts** dialog, select the GitHub account, and untick
-**Enable Notifications**. Do this for each connected account.
+**What didn't work:** unticking **Enable Notifications** in Fork's **Accounts** dialog. The
+box stays unticked while Fork is open, but it's ticked again after Fork restarts, so the
+setting doesn't persist (at least under Wine). The crash came back, even right at launch,
+because the first refresh found unread GitHub notifications straight away.
 
-The account stays connected (OAuth, PR integration and so on keep working); only the toast
-notifications are turned off.
+**Fix:** **remove the GitHub account** from Fork's Accounts dialog (the `−` button). No
+account means no notification refresh, so the crashing code path never runs.
+
+What you keep and lose:
+
+- **Still works:** fetch, pull, push, branches, history and diffs. Those use Git over **SSH**
+  with your keys (see 10.4), not the Fork account.
+- **Lost:** Fork's GitHub-specific integration (account notifications, PR features).
+
+> **Worth reporting to Fork support:** the Enable Notifications checkbox doesn't persist
+> across restarts, and `SendWindowsNotification` has no fallback when WinRT is missing.
+> A try/catch around the toast call would fix it for any system without WinRT, not just Wine.
 
 > **Copying the prefix to another machine?** Fork's settings live inside the prefix (the
-> Windows user's `AppData`), so an `rsync`'d `.wine-fork` keeps this setting. A
-> *fresh* install needs it unticked again.
+> Windows user's `AppData`), so an `rsync`'d `.wine-fork` carries the removed account
+> over too. On a *fresh* install, just don't add the GitHub account.
 
 ### 10.6 A menu launcher that actually works
 
