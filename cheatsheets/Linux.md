@@ -81,6 +81,16 @@ Check for rclone process:
 pgrep -a rclone
 ```
 
+Examples:
+
+```bash
+rclone mount --allow-other --allow-non-empty --uid 1000 --gid 1003 --default-permissions --vfs-cache-mode full --vfs-refresh --dir-cache-time 8760h --poll-interval 1m --vfs-cache-poll-interval 1m --vfs-cache-max-age 9999h --cache-dir <path/to/cache> --vfs-cache-max-size 50G google-drive:<path/to/remote> <path/to/local> &
+
+rclone mount --allow-other --allow-non-empty --uid 1000 --gid 1003 --default-permissions --poll-interval 1m google-drive:<path/to/remote> <path/to/local> &
+
+@reboot rclone mount --allow-other --allow-non-empty --default-permissions gdrive:<path/to/remote> <path/to/local> &
+```
+
 ## Fstab
 
 Editing and reloading:
@@ -92,4 +102,15 @@ sudo systemctl daemon-reload                # systemd builds mount units from fs
 sudo umount </path/to/drive>
 sudo mount -a                               # remount with the new options
 ls -ld </path/to/drive>   # should show drwxrwxr-x katy media
+```
+
+## Jellyfin
+
+Shutdown, backup, and update Jellyfin
+
+```bash
+sudo systemctl stop jellyfin
+sudo cp -p /var/lib/jellyfin/data/jellyfin.db /mnt/storage/katy/jellyfin-db-GOOD-511eps-$(date +%Y%m%d-%H%M).db
+sudo chown katy:katy /mnt/storage/katy/jellyfin-db-GOOD-*.db
+sudo apt install --only-upgrade --no-install-recommends "^jellyfin" 
 ```
