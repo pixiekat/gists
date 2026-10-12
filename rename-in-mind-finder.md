@@ -30,3 +30,5 @@ To match the start of a filename exactly:
 
 Find: `^(\d{2})\s`
 Replace: `Saturday Night Live - S20E\1 -`
+
+Match anything: `https://stackoverflow.com/a/35352234`.

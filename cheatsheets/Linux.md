@@ -61,6 +61,68 @@ sudo apt install --reinstall lightdm lightdm-settings slick-greeter
 sudo dpkg-reconfigure lightdm
 ```
 
+Configure `sudo` to never ask for a password:
+
+See the [askubuntu](https://askubuntu.com) answer right here: `https://askubuntu.com/a/147265`
+
+```shell
+#
+# This file MUST be edited with the 'visudo' command as root.
+#
+# Please consider adding local content in /etc/sudoers.d/ instead of
+# directly modifying this file.
+#
+# See the man page for details on how to write a sudoers file.
+#
+Defaults    env_reset
+Defaults    mail_badpass
+Defaults    secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
+
+# Host alias specification
+
+# User alias specification
+
+# Cmnd alias specification
+
+# User privilege specification
+root    ALL=(ALL:ALL) ALL
+
+# Members of the admin group may gain root privileges
+%admin ALL=(ALL) ALL
+
+# Allow members of group sudo to execute any command
+%sudo   ALL=(ALL:ALL) ALL
+
+# See sudoers(5) for more information on "#include" directives:
+
+#includedir /etc/sudoers.d
+
+YOUR_USERNAME_HERE ALL=(ALL) NOPASSWD: ALL
+```
+
+Create, modify, and delete groups:
+
+See: `https://www.redhat.com/en/blog/linux-groups`.
+
+-Create group: `sudo groupadd demo`
+-Create group with specific gid: `sudo groupadd -g 1009 demo1`
+-Change the gid: `sudo groupmod -g 1011 demo1`
+-Rename a group: `sudo groupmod -n test demo1`
+-Add user to a group: `sudo usermod --append --groups demo user1` or `sudo usermod -aG demo user2`
+-Remove user from a group: `sudo gpasswd --delete user1 demo`
+-Delete a group: `sudo groupdel demo`
+
+Passwords:
+
+-Change your password: `sudo passwd`
+-Change user password: `sudo passwd {userNameHere}`
+-Remove password for user: `sudo passwd -d jerry` or `sudo passwd --delete jerry`
+-Lock and unlock changes: `sudo passwd -l {username}` and `sudo passwd -u {username}`
+
+Create additional user on EC2 instance:
+
+See: `https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/managing-users.html`.
+
 ## Rclone Mounting
 
 Find mounted drives in rclone:
