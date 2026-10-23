@@ -1,6 +1,6 @@
 # Server Hardening Runbook: Apache, ModSecurity & fail2ban
 
-Oct 11, 2026 · @Katherine
+Oct 23, 2026 · @Katherine
 
 ## Overview
 
@@ -30,21 +30,89 @@ This runbook is written from the Hetzner box (Debian, Apache + PHP-FPM, Docker) 
 
 Two reusable rule sets, attached together to every server: one for the world, one for admin access. Hetzner Cloud Firewalls and AWS security groups both combine attached sets as a union of allow rules, so if either set allows a port, it is open.
 
-| Rule set | Ports | Source |
-| --- | --- | --- |
-| public-access | ICMP, TCP 80, TCP 443 | Any IPv4 / IPv6 |
-| devops | TCP 22 (MySQL only if ever needed) | Trusted IPs only |
+| Rule set | Direction | Protocol · port | Peer | Why |
+| --- | --- | --- | --- | --- |
+| public-access | In | ICMP | Any IPv4 / IPv6 | Ping, Path MTU Discovery (IPv6 needs it) |
+| public-access | In | TCP 80, 443 | Any IPv4 / IPv6 | Websites, ACME challenges |
+| public-access | Out | TCP 80, 443 | Any IPv4 / IPv6 | apt, Docker pulls, certbot, AbuseIPDB, GeoIP updates |
+| public-access | Out | TCP 53, UDP 53 | Any IPv4 / IPv6 | DNS |
+| public-access | Out | UDP 123 | Any IPv4 / IPv6 | NTP |
+| public-access | Out | UDP 41641, UDP 3478 | Any IPv4 / IPv6 | Tailscale direct paths + STUN (without them, traffic falls back to DERP relays over 443) |
+| public-access | Out | TCP 587 | Any IPv4 / IPv6 | Mail submission (Hetzner blocks 25 and 465 by default on new accounts) |
+| public-access | Out | TCP 23 | Storage Box IPv4 /32 + IPv6 /128 only | SFTP, rsync, borg to the two Storage Boxes |
+| public-access | Out | TCP 43 | Any IPv4 / IPv6 | whois lookups |
+| public-access | Out | ICMP | Any IPv4 / IPv6 | Ping, traceroute -I |
+| devops | In | TCP 22 | Trusted sources: single hosts as /32, ranges as CIDR (work VPN /21s) | SSH fallback; daily admin goes over Tailscale |
 
 - Backend ports (Anubis backend 3006, app ports, databases) never appear in either set.
-- Tailscale needs no inbound rule: it connects outward and uses relays if needed.
+- Both clouds are stateful: replies to allowed traffic come back on their own, so rules only cover new connections.
+- Hetzner allows all outbound until the first outbound rule exists; from then on only listed traffic leaves, so DNS, NTP and Tailscale must be listed.
+- Hetzner rule sets take IPs, not hostnames: a pinned rule (the Storage Box) breaks silently if the target's IP ever changes.
+- Tailscale needs no inbound rule. SSH over the tailnet travels inside WireGuard UDP, so the cloud firewall never sees a 100.x source; a 100.64.0.0/10 rule on 22 does nothing there.
 - Database access goes through an SSH tunnel (DBeaver) or the tailnet, never a public 3306.
+
+### Pinning a rule to one host
+
+The outbound TCP 23 rule points only at the two Storage Boxes. Look up both address families for each box, then enter IPv4 as `/32` and IPv6 as `/128`; boxes on the same host share one entry per family.
+
+```bash
+# getent is always installed; ahosts returns both families
+getent ahostsv4 <user>.your-storagebox.de | awk '{print $1}' | sort -u   # IPv4 → x.x.x.x/32
+getent ahostsv6 <user>.your-storagebox.de | awk '{print $1}' | sort -u   # IPv6 → xxxx::/128
+
+# dig (bind9-dnsutils) splits A and AAAA
+dig +short A    <user>.your-storagebox.de
+dig +short AAAA <user>.your-storagebox.de
+```
+
+Traceroute shows only one address (IPv6 when the host has one), so use `getent` or `dig` for the full set. Keep the IPs in 1Password beside the box's login, and make the backup job alert on failure (an Uptime Kuma push monitor), so a Storage Box migration to new hardware shows up as a failed backup rather than silence.
+
+### Checking the rules from the server
+
+Run these after any outbound change; each line names the good result.
+
+```bash
+# DNS (Debian has no resolvectl without systemd-resolved)
+getent hosts example.com                 # prints addresses
+
+# Time
+timedatectl show -p NTPSynchronized      # NTPSynchronized=yes
+
+# Tailscale
+tailscale netcheck                       # UDP: true
+tailscale status                         # peers "direct", not "relay"
+
+# Traceroute through the firewall: default UDP 33434+ is blocked, so use an allowed protocol
+sudo traceroute -I <host>                # ICMP
+sudo traceroute -T -p 23 <host>          # TCP, same path as the backups
+
+# Storage Box reachable on the pinned rule
+sftp -P 23 <user>@<user>.your-storagebox.de <<< 'ls'   # lists files
+```
+
+### AWS (work EC2) differences
+
+The work box uses the same two-set split as security groups; these points differ from Hetzner.
+
+| Topic | AWS behaviour | Action |
+| --- | --- | --- |
+| DNS, NTP | Traffic to the Amazon VPC resolver and Amazon Time Sync (169.254.169.123) is not filtered by security groups | No rule needed, unless the box uses an outside resolver such as 1.1.1.1 |
+| IPv6 outbound | Inbound has `::/0` rules; outbound has none | Add `::/0` for TCP 80 and 443 so IPv6-first mirrors don't stall |
+| ICMP inbound | None today | Add ICMP type 3 code 4 (fragmentation needed) and ICMPv6 Packet Too Big for Path MTU Discovery |
+| TCP 8080 inbound | Open to `0.0.0.0/0` and `::/0` | Find the listener (`sudo ss -tlnp \| grep ':8080'`); close it or move it to devops |
+| TCP 25 outbound | Open; AWS throttles 25 by default | Drop it if mail relays over 587/465 |
+| SSM agent | Needs outbound 443 | Keep |
+| devops | TCP 22 from trusted IPs and the work VPN ranges | Keep |
 
 Checklist:
 
-- [ ] public-access holds only ICMP, 80, 443
-- [ ] devops holds only 22, limited to trusted IPs
-- [ ] Nothing like 3006, 3007 or 3306 in public-access
+- [ ] public-access inbound holds only ICMP, 80, 443
+- [ ] public-access outbound lists 80/443, DNS 53 (TCP+UDP), NTP 123, Tailscale UDP 41641 + 3478, 587, Storage Box 23, whois 43, ICMP
+- [x] Storage Box rule pinned to its IPv4 /32 and IPv6 /128; IPs saved in 1Password
+- [ ] devops holds only 22, limited to trusted IPs and CIDR ranges
+- [ ] Nothing like 3006, 3007, 3306 or 8080 in public-access
 - [ ] From outside: `curl -sI --max-time 5 -H "Host: example.com" http://<server-ip>:3006/` times out
+- [x] After any outbound change: DNS, NTP, `tailscale netcheck` and the SFTP test all pass
 
 ## Access: users, SSH and sudo
 
@@ -449,6 +517,7 @@ Modify to suit your own needs.
 | apache-denied | Public sites' error logs | 5 `AH01630` / `AH01797` access-rule denials / 10m | 1d | 19, 21 |
 | apache-geo | Private sites' + catch-all error logs | 5 `AH01630` denials / 10m | 1d | 19, 21 |
 | drupal-auth | `/var/log/syslog` (Drupal syslog module) | 10 failed Drupal logins / 1h | 1h, doubling to 1w | 18 Brute-Force |
+| modsec-tripwire | `/var/log/apache2/*error.log` | 1 hit on an unambiguous custom rule (9000111 RedTail) | 1w | 19, 21 |
 | apache-modsecurity | Error logs | Anomaly score exceeded | default | 21 |
 | apache-goscanner | Error logs | Go-UA rule hit | default | 19, 21 |
 | apache-noscript | Error logs | Script probes | default | 21 |
@@ -565,6 +634,116 @@ action   = iptables-multiport[name=apache-denied, port="http,https", protocol=tc
 
 If a server has no Apache HTTP auth at all (no `AH01617` / `AH01618` lines in its error logs), `apache-auth` has nothing left to catch and can simply be disabled.
 
+### One-strike ModSecurity tripwire
+
+Some custom rules only ever match known-bad clients, like `9000111` for the RedTail botnet. Slow bots spread their hits over hours, so they never reach a normal jail's threshold. This jail bans on the first hit of any rule ID listed in its filter.
+
+```ini
+# filter.d/modsec-tripwire.conf
+# Custom ModSecurity rules that only ever match known-bad clients.
+#   9000111 = RedTail botnet        9000114 = .env probes
+#   9000112 / 9000113 = custom      9000115 = VCS (.git/.svn) probes
+#   9000117 = Next.js middleware bypass (CVE-2025-29927, work box only)
+# Add more IDs to the group as you trust them.
+#
+# Why the optional (?: \[client ...\])? group:
+# ModSecurity 2.9.x writes the client a SECOND time in its own tag, e.g.
+#   [client 1.2.3.4:5678] [client 1.2.3.4] ModSecurity: Access denied ...
+# Apache's prefix (_apache_error_client) only eats the first one, so
+# without this group the line silently never matches (Total failed: 0).
+# The ? keeps it working on versions that don't repeat the tag.
+#
+# Test before reloading (use a log that actually has hits, incl. rotated):
+#   sudo fail2ban-regex /var/log/apache2/catchall-error.log.1 \
+#        /etc/fail2ban/filter.d/modsec-tripwire.conf
+[INCLUDES]
+before = apache-common.conf
+
+[Definition]
+failregex = ^%(_apache_error_client)s(?: \[client [^\]]+\])? ModSecurity: Access denied with code 403 \(phase 1\)\..*\[id "(?:9000111|9000112|9000113|9000114|9000115|9000117)"\]
+ignoreregex =
+```
+
+```ini
+# jail.d/modsec-tripwire.local
+[modsec-tripwire]
+enabled  = true
+port     = http,https
+filter   = modsec-tripwire
+logpath  = /var/log/apache2/*error.log
+maxretry = 1
+bantime  = 1w
+action   = iptables-multiport[name=modsec-tripwire, port="http,https", protocol=tcp]
+           abuseipdb[abuseipdb_apikey=<key>, abuseipdb_category="19,21"]
+```
+
+#### Keep apache-modsecurity off the tripwire IDs
+
+The stock `apache-modsecurity` jail matches every ModSecurity denial, including the tripwire's. A scanner that fires three `.env` hits in under a second (`.env`, `.env.bak`, `.env.backup`) reaches its `maxretry = 3` at the same moment the tripwire bans. Both jails then report the IP, and the second report gets a **429** under AbuseIPDB's 15-minute duplicate rule. The ban still works, but fail2ban logs it as `Error banning`, and the report that does go through carries the generic CRS message instead of the custom one.
+
+The fix is to have `apache-modsecurity` ignore the tripwire IDs, so each hit gets one ban and one report:
+
+```ini
+# jail.local (or jail.d/apache-modsecurity.local, but not both)
+[apache-modsecurity]
+# The custom one-strike IDs belong to modsec-tripwire. Skipping them here
+# means one ban, one report (with the custom msg), and no 15-minute 429.
+#   90001 + 1 + [1-57]  ->  9000111-9000115, 9000117
+# (9000116 / 9000118 are nolog pass rules, so they never reach the log.)
+# Update this whenever an ID is added to the tripwire filter.
+ignoreregex = \[id "90001(?:1[1-57])"\]
+```
+
+Test it against the jail as saved, without passing an ignoreregex on the command line. When given a jail name, `fail2ban-regex` loads that jail's ignoreregex, and adding a second one on the command line crashes it with `IndexError: list index out of range`. Use the log that has the hits; bare-IP scanners land in `catchall-error.log`:
+
+```bash
+# Which log has tripwire hits?
+sudo grep -lE '\[id "90001(1[1-57])"\]' /var/log/apache2/*error.log
+
+# Tripwire lines should show as "ignored", not "matched"
+sudo fail2ban-regex /var/log/apache2/catchall-error.log apache-modsecurity
+
+sudo fail2ban-client reload apache-modsecurity
+```
+
+Test against the *error* log (ModSecurity denials never appear in access logs), with the exact file name: `sudo fail2ban-regex /var/log/apache2/catchall-error.log /etc/fail2ban/filter.d/modsec-tripwire.conf`. Bare-IP probes land in the catch-all's log.
+
+### Big jails: switch to ipset
+
+A normal iptables ban action adds one rule per IP, and every packet walks the list. Once a jail holds hundreds of IPs (the honeypot fills up fast with crawler fleets), an ipset ban action keeps them all in one hash set behind a single iptables rule: one lookup per packet, however big the jail grows. The default set holds up to 65,536 entries.
+
+```bash
+sudo apt install ipset
+```
+
+```ini
+# jail.d/anubis-honeypot.local (only the action changes)
+action = iptables-ipset-proto6-allports[name=anubis-honeypot]
+         abuseipdb[abuseipdb_apikey=<key>, abuseipdb_category="19"]
+```
+
+Changing a jail's `action` needs a restart of that jail. A plain `reload` keeps the existing bans on the old iptables chain, and the new set only appears with the next ban. `--restart` removes the old chain, creates the set and restores every ban from the database into it (`norestored` stops them being re-reported):
+
+```bash
+sudo fail2ban-client -d >/dev/null && sudo fail2ban-client reload --restart anubis-honeypot
+
+# The single rule that checks the set
+sudo iptables -S INPUT | grep match-set
+
+# Header only: entry count and memory (-t = terse)
+sudo ipset list -t f2b-anubis-honeypot
+
+# Full member list
+sudo ipset list f2b-anubis-honeypot
+```
+
+The dotfiles wrap these as `ipset-inmate-count <jail>`, `ipset-check-jail-set` and `ipset-view-inmates <jail>`. `timeout 0` on each entry is normal: fail2ban still removes IPs when their ban ends. The rule matches TCP only ("allports" means every port, not every protocol), which covers all HTTP visitors.
+
+- [ ] `ipset` installed
+- [ ] Jail restarted with `--restart` after changing its action
+- [ ] `iptables -S INPUT | grep match-set` shows the rule; the old per-IP chain is gone
+- [ ] Entry count roughly matches the old chain's rule count
+
 ### Drupal logins
 
 Drupal logins never appear in Apache's logs as failures. Enable Drupal's syslog module (`drush en syslog -y`) and use the stock `drupal-auth` filter against syslog.
@@ -606,6 +785,17 @@ bantime   = -1
 ```
 
 Back up manual bans to `dotfiles-private/fail2ban/manual-bans.txt` with `fail2ban-client get manual banip`, and restore with a `while read` loop of `banip`.
+
+You can test regex with the following:
+
+`sudo fail2ban-regex /var/log/apache2/``<``l``o``g``n``a``m``e``>``-error.log /etc/fail2ban/filter.d/``<``f``i``l``t``e``r``>``.conf`
+
+When you're ready, reload and set up the jail.
+
+```bash
+sudo fail2ban-client -d >/dev/null && sudo fail2ban-client reload
+sudo fail2ban-client status <jail>
+```
 
 Checklist:
 
@@ -725,6 +915,7 @@ umask 077
 - Uptime Kuma (127.0.0.1:3001, behind the geo snippet) alerts through ntfy.
 - Kuma lives on the same server, so a full outage silences it: add an outside watcher (a second Kuma at home, a hosted pinger, or a heartbeat that alerts when pings stop).
 - Optional: `etckeeper` puts `/etc` under git, so every config change has a history.
+- Router backups and VPN profiles in the Storage Box `secrets` folder hold private keys: the mount is limited to your user, but the box stores files as-is, so encrypt them before upload (`age -r "$(cat ~/.config/age/me.pub)" -o vpn-profiles.tar.age vpn-profiles.tar`).
 
 Checklist:
 
@@ -806,7 +997,7 @@ Every item here cost real debugging time once; most fail silently.
 Left for later:
 
 - [ ] Whole-ASN bans for abuse-tolerant hosts (AS48090 TECHOFF) via a monthly prefix refresh
-- [ ] `iptables-ipset` ban action once jails hold hundreds of IPs
+- [ ] `iptables-ipset` ban action once jails hold hundreds of IPs (done for anubis-honeypot; extend to other jails as they grow)
 - [ ] Baikal invite email: disable it, or relay through msmtp on port 587
 - [ ] Snakeoil cert on both catch-all vhosts
 - [ ] Trim `.vimrc`, `.inputrc`, `split-show.sh` warnings from the dotfiles link script
