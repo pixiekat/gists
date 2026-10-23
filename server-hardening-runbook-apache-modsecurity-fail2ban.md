@@ -706,6 +706,32 @@ sudo fail2ban-regex /var/log/apache2/catchall-error.log apache-modsecurity
 sudo fail2ban-client reload apache-modsecurity
 ```
 
+#### Which jail does a new rule go in?
+
+Pick the jail by how sure you are that the client is bad, not by how bad the request looks. Every custom rule already blocks the request with a 403. The jail only decides whether one hit costs the client a long ban and an AbuseIPDB report.
+
+| Tier | Jail | Strikes / ban | Use when | Examples |
+| --- | --- | --- | --- | --- |
+| 1 | `apache-modsecurity`, `apache-goscanner` | 3 in 10 min, 1 day | Probably a bot, but a real client or tool could trip it | `9000110` Go default UA (Umbrella `146.112.0.0/16` exempt), generic CRS blocks |
+| 2 | `modsec-tripwire` | 1, 1 week, reported | No legitimate client ever sends this | `9000111` RedTail UA, `9000114` `.env`, `9000115` VCS, `9000117` Next.js `X-Middleware-Subrequest` |
+| 3 | `manual` | By hand, long | Repeat offenders and ranges I've decided to block | Whole-range CIDR bans after an AbuseIPDB check-block |
+
+`recidive` sits above all of them and lengthens bans for IPs that keep coming back after tier 1 or 2 bans expire.
+
+Before promoting a rule to the tripwire:
+
+- Ask whether any monitor, webhook, integration or internal tool could ever send it. If the answer is "maybe", keep it at tier 1.
+- Check who has been hitting it so far:
+
+```bash
+# Distinct clients hitting a rule (swap the ID), most frequent first
+sudo grep -h '\[id "9000110"\]' /var/log/apache2/*error.log* 2>/dev/null \
+  | grep -oE '\[client [0-9.]+' | sort | uniq -c | sort -rn
+```
+
+- When you promote one, add the ID to the tripwire `failregex` **and** widen the `apache-modsecurity` `ignoreregex`, then test both with `fail2ban-regex` before reloading.
+- New CVE tripwires (e.g. `9000120` for the PHP CVEs) start as tier 2 only when the exploit pattern can't appear in normal traffic.
+
 Test against the *error* log (ModSecurity denials never appear in access logs), with the exact file name: `sudo fail2ban-regex /var/log/apache2/catchall-error.log /etc/fail2ban/filter.d/modsec-tripwire.conf`. Bare-IP probes land in the catch-all's log.
 
 ### Big jails: switch to ipset
@@ -1001,3 +1027,16 @@ Left for later:
 - [ ] Baikal invite email: disable it, or relay through msmtp on port 587
 - [ ] Snakeoil cert on both catch-all vhosts
 - [ ] Trim `.vimrc`, `.inputrc`, `split-show.sh` warnings from the dotfiles link script
+
+## Appendix: Changelog
+
+Newest first. Add a row whenever a section changes, and bump the date at the top when you export to gists, so the two copies stay in step.
+
+| Date | Section | Change |
+| --- | --- | --- |
+| 2026-10-23 | One-strike ModSecurity tripwire | New subsection: "Which jail does a new rule go in?" (three tiers, checklist for promoting a rule to the tripwire) |
+| 2026-10-23 | One-strike ModSecurity tripwire | New subsection: keep `apache-modsecurity` off the tripwire IDs (`ignoreregex`, fixes double bans and the AbuseIPDB 429) |
+| 2026-10-23 | One-strike ModSecurity tripwire | Filter regex now allows ModSecurity 2.9.x's repeated `[client]` tag; full ID list; `fail2ban-regex` test |
+| — | Network firewall | Hetzner rules table, notes, pinning a rule to one host, checking rules from the server, AWS differences, rewritten checklist |
+| — | Backups | `age`-encrypted router/VPN profiles in the Storage Box `secrets` folder |
+| 2026-10-11 | All | Runbook created |
