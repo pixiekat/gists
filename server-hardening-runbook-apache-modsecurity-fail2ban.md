@@ -1,6 +1,6 @@
 # Server Hardening Runbook: Apache, ModSecurity & fail2ban
 
-Oct 23, 2026 · @Katherine
+Oct 28, 2026 · @Katherine
 
 ## Overview
 
@@ -732,6 +732,73 @@ sudo grep -h '\[id "9000110"\]' /var/log/apache2/*error.log* 2>/dev/null \
 - When you promote one, add the ID to the tripwire `failregex` **and** widen the `apache-modsecurity` `ignoreregex`, then test both with `fail2ban-regex` before reloading.
 - New CVE tripwires (e.g. `9000120` for the PHP CVEs) start as tier 2 only when the exploit pattern can't appear in normal traffic.
 
+#### Moving a jail to ipset
+
+The stock `iptables-multiport` action adds one rule per banned IP to the jail's chain, and every packet walks that list in order. Past roughly 100 entries (the tripwire hit 250 on Hetzner and 150 on the work box within a week), switch the jail to an ipset: one kernel hash lookup per packet, whether the set holds 30 or 30,000 IPs.
+
+| Jail | Ban length / growth | ipset? |
+| --- | --- | --- |
+| `modsec-tripwire`, `anubis-honeypot` | 1w+, grows fast | Yes |
+| `manual` | Long, mostly CIDRs | Optional (needs `hash:net`) |
+| `apache-modsecurity`, `apache-denied`, `apache-geo` | 1d, stays small | Not needed |
+
+**1. Change the action.** Keep the AbuseIPDB line as it is.
+
+```ini
+# jail.d/modsec-tripwire.local
+# type=multiport is REQUIRED for a port list: the default (oneport) generates
+# --dport http,https, which iptables rejects ("invalid port/service") and the
+# start action fails on the first ban. With it, the rule is -m multiport --dports 80,443.
+# Leave port out, or use iptables-ipset-proto6-allports, to reject every TCP port.
+action = iptables-ipset[type=multiport, name=modsec-tripwire, port="http,https", protocol=tcp]
+         abuseipdb[abuseipdb_apikey=<key>, abuseipdb_category="19,21"]
+```
+
+**2. Reload, then copy the existing bans into the set.** A reload can leave the new set empty. fail2ban still tracks the bans in memory, so copy them straight in with `ipset add`. Don't use `fail2ban-client set … banip`, which reruns the abuseipdb action and reports every IP again.
+
+```bash
+sudo fail2ban-client reload modsec-tripwire
+
+# How many bans fail2ban still tracks for this jail
+sudo fail2ban-client get modsec-tripwire banip | wc -w
+
+# Copy them into the set (-exist skips duplicates; no new AbuseIPDB reports)
+for ip in $(sudo fail2ban-client get modsec-tripwire banip); do
+  sudo ipset add -exist f2b-modsec-tripwire "$ip"
+done
+```
+
+If fail2ban has forgotten them (count is 0), paste the old `jail-roll-call` chain output into a file and add each IP with its own expiry: `awk '$3=="REJECT"{print $8}' old.txt | while read ip; do sudo ipset add -exist f2b-modsec-tripwire "$ip" timeout 604800; done`.
+
+**3. Check `References`. This is the step that's easy to miss.** fail2ban only creates the iptables rule when the jail bans someone. If you filled the set by hand, the set can hold every IP and still block nothing.
+
+```bash
+sudo ipset list f2b-modsec-tripwire | grep -E 'References|Number of entries'
+sudo iptables -S | grep 'match-set f2b-modsec-tripwire'
+```
+
+- `References: 1` and a `-j REJECT` line: it's blocking.
+- `References: 0` and no rule: add the rule fail2ban would have made:
+
+```bash
+sudo iptables -I INPUT -p tcp -m multiport --dports 80,443 \
+  -m set --match-set f2b-modsec-tripwire src \
+  -j REJECT --reject-with icmp-port-unreachable
+```
+
+After the jail's next real ban, run `sudo iptables -S INPUT | grep -c f2b-modsec-tripwire`. If it says `2`, remove the manual copy (same command with `-D`), so fail2ban's own rule is the one in place.
+
+**4. Keep ban history long enough.** fail2ban purges its database after `dbpurgeage` (default `1d`). Bans older than that can't be restored after a restart, and ban-increment won't recognise a repeat offender after a long ban expires.
+
+```ini
+# /etc/fail2ban/fail2ban.local
+[DEFAULT]
+# At least as long as the longest ban (bantime.maxtime = 4w)
+dbpurgeage = 5w
+```
+
+Then `sudo systemctl restart fail2ban`. `jail-roll-call` lists ipset jails in their own `=== ipset jails ===` section.
+
 Test against the *error* log (ModSecurity denials never appear in access logs), with the exact file name: `sudo fail2ban-regex /var/log/apache2/catchall-error.log /etc/fail2ban/filter.d/modsec-tripwire.conf`. Bare-IP probes land in the catch-all's log.
 
 ### Big jails: switch to ipset
@@ -1034,6 +1101,7 @@ Newest first. Add a row whenever a section changes, and bump the date at the top
 
 | Date | Section | Change |
 | --- | --- | --- |
+| 2026-10-28 | One-strike ModSecurity tripwire | New subsection: moving a jail to ipset (action swap, copying existing bans, the References: 0 check, dbpurgeage) |
 | 2026-10-23 | One-strike ModSecurity tripwire | New subsection: "Which jail does a new rule go in?" (three tiers, checklist for promoting a rule to the tripwire) |
 | 2026-10-23 | One-strike ModSecurity tripwire | New subsection: keep `apache-modsecurity` off the tripwire IDs (`ignoreregex`, fixes double bans and the AbuseIPDB 429) |
 | 2026-10-23 | One-strike ModSecurity tripwire | Filter regex now allows ModSecurity 2.9.x's repeated `[client]` tag; full ID list; `fail2ban-regex` test |
